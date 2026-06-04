@@ -195,8 +195,6 @@ LLMs are powerful but inherently unpredictable — they can be manipulated into 
 - Gives operators full control over what the chatbot will and will not engage with
 - Builds user trust by ensuring the product behaves predictably and responsibly
 
----
-
 **Input Guardrails** *(request → LLM)*
 
 Input guardrails intercept the user's message before it is sent to the LLM. Their job is to ensure that no malicious, manipulative, or out-of-scope content reaches the model:

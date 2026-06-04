@@ -132,6 +132,58 @@ Both figures exclude the network round-trip to the Redis Cluster (~0.1–1ms on 
 **Technologies:**
 - *Cache Store* — Redis with the RediSearch module (part of Redis Stack) for vector indexing and KNN search
 
+### RAG & Vector DB
+**Retrieval-Augmented Generation (RAG)** is a technique that enhances LLM responses by injecting relevant external knowledge into the prompt at query time. Instead of relying solely on what the model learned during training, RAG fetches up-to-date, domain-specific context from a knowledge base — making the system more accurate, grounded, and easier to maintain without retraining the model.
+
+**How RAG helps the system:**
+- Reduces hallucinations by grounding the LLM's response in retrieved facts
+- Enables the chatbot to answer questions about private or proprietary data the LLM was never trained on
+- Keeps knowledge current — the Vector DB can be updated independently without touching the model
+- Allows citations and source attribution by surfacing which documents informed the response
+
+**RAG Walkthrough:**
+
+RAG operates in two phases — an offline ingestion phase and an online retrieval phase:
+
+*Ingestion (offline):*
+1. Source documents (PDFs, wikis, databases, etc.) are split into smaller **chunks** (typically 256–512 tokens each)
+2. Each chunk is passed through an **embedding model** to produce a vector representation
+3. The vector and its associated metadata (source, chunk text, document ID) are stored in the **Vector DB**
+
+*Retrieval (online, at query time):*
+1. The user's query is embedded using the same model used during ingestion
+2. A **KNN / ANN search** is run against the Vector DB to retrieve the top-K most semantically similar chunks
+3. Retrieved chunks are ranked and the most relevant ones are injected into the prompt as context
+4. The LLM generates a response conditioned on both the conversation history and the retrieved context
+
+**How RAG enriches the output:**
+
+Without RAG, the LLM responds purely from parametric memory — what it learned during training — which can be outdated or simply absent for domain-specific topics. With RAG, the prompt explicitly contains relevant facts, leading to:
+- More specific and accurate answers grounded in real source material
+- Fewer confident but wrong (hallucinated) responses
+- The ability to handle internal knowledge bases, product documentation, or real-time data the model has never seen
+
+**Embedding Models:**
+- *Open Source* — `all-MiniLM-L6-v2` (384 dims, fast), `all-mpnet-base-v2` (768 dims, higher accuracy) via Sentence Transformers, `BGE-M3` (multi-lingual, strong retrieval performance)
+- *Closed Source / Managed* — OpenAI `text-embedding-3-small` (1536 dims), `text-embedding-3-large` (3072 dims), Cohere Embed v3, Google `text-embedding-gecko`
+
+The same embedding model must be used at both ingestion and retrieval time — mixing models produces incomparable vectors and degrades retrieval quality significantly.
+
+**Vector DB Technologies:**
+- *Open Source* — Qdrant, Weaviate, Milvus, ChromaDB, pgvector (PostgreSQL extension)
+- *Managed / Closed Source* — Pinecone, Zilliz (managed Milvus), Weaviate Cloud
+
+**Approximate RAG Latency:**
+
+| Step | Approximate Time |
+|---|---|
+| Query embedding | ~20–100ms (API-based models); ~5–20ms (local models) |
+| Vector search (ANN) | ~5–50ms depending on dataset size and index type |
+| Chunk fetch & assembly | ~10–30ms |
+| **Total RAG pipeline** | **~50–200ms end-to-end** |
+
+This adds overhead compared to a direct LLM call, but is substantially faster than retraining or fine-tuning and well within acceptable latency budgets given that LLM generation itself typically takes 500ms–several seconds.
+
 ---
 
 ## Data Flow

@@ -184,6 +184,49 @@ The same embedding model must be used at both ingestion and retrieval time — m
 
 This adds overhead compared to a direct LLM call, but is substantially faster than retraining or fine-tuning and well within acceptable latency budgets given that LLM generation itself typically takes 500ms–several seconds.
 
+### Guardrails
+The Guardrails layer is a dedicated content moderation service powered by a classification model that sits at two critical points in the pipeline — **before** the request reaches the LLM and **after** the LLM generates a response. It acts as the system's safety net, ensuring neither end of the conversation can be weaponised or misused.
+
+**Why this layer is absolutely necessary:**
+
+LLMs are powerful but inherently unpredictable — they can be manipulated into producing harmful content, leaking confidential information, or going wildly off-topic. Without a dedicated moderation layer, the system is only as safe as the base model's own (often inconsistent) safety training. Guardrails provide an explicit, auditable, and independently tunable safety boundary that:
+- Protects users from harmful or offensive LLM outputs
+- Protects the system from adversarial inputs designed to exploit the model
+- Gives operators full control over what the chatbot will and will not engage with
+- Builds user trust by ensuring the product behaves predictably and responsibly
+
+---
+
+**Input Guardrails** *(request → LLM)*
+
+Input guardrails intercept the user's message before it is sent to the LLM. Their job is to ensure that no malicious, manipulative, or out-of-scope content reaches the model:
+
+- **Prompt Injection** — detects attempts to override or hijack the system prompt by embedding instructions inside user messages (e.g. *"Ignore all previous instructions and..."*). The model is prevented from acting on injected directives that conflict with the system's intended behaviour
+- **Jailbreaking** — identifies attempts to bypass the model's safety training through adversarial phrasing, roleplay scenarios, or obfuscation techniques designed to make the model produce content it would otherwise refuse
+- **Topic Moderation** — classifies the user's intent and flags or blocks messages that fall outside the application's defined scope (e.g. a customer support bot should not engage with requests for illegal content or unrelated political discussions)
+- **PII Detection** — identifies and redacts personally identifiable information in the input before it is logged or forwarded, protecting user privacy
+
+**Output Guardrails** *(LLM → user)*
+
+Output guardrails inspect the LLM's response before it is returned to the client. Even a well-behaved model can occasionally produce unsafe content — output guardrails ensure nothing harmful ever surfaces to the end user:
+
+- **Toxicity & Hate Speech Detection** — flags and blocks responses containing offensive, discriminatory, or harmful language
+- **Hallucination & Factual Grounding Check** — optionally verifies that the response is consistent with the retrieved RAG context, catching cases where the model fabricates information
+- **PII Leakage Detection** — ensures the model has not surfaced sensitive data (e.g. from RAG-retrieved documents) that the user should not have access to
+- **Policy Compliance** — checks that the response adheres to organisational, legal, or regulatory requirements (e.g. financial or medical disclaimers)
+
+**How Guardrails improve user experience and trust:**
+
+Beyond safety, a well-tuned Guardrails layer directly improves the quality of the user experience:
+- Users receive consistent, on-topic responses — the chatbot does not go off the rails or engage with adversarial edge cases
+- Transparent refusals (e.g. *"I can't help with that"*) are more trustworthy than model-generated deflections that may vary wildly in quality
+- Operators can tune guardrail policies over time without retraining the underlying LLM, making it easy to adapt to new risks or compliance requirements
+- Audit logs from the guardrails layer provide a clear paper trail for reviewing flagged interactions, which is essential in regulated industries
+
+**Technologies:**
+- *Open Source* — NeMo Guardrails (NVIDIA), Guardrails AI, LlamaGuard (Meta), Perspective API
+- *Managed / Closed Source* — Azure Content Safety, AWS Comprehend, OpenAI Moderation API
+
 ---
 
 ## Data Flow

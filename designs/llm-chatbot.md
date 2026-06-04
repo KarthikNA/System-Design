@@ -73,11 +73,8 @@ The API Gateway is the single entry point for all client requests. It sits betwe
 - **Streaming Support** — since LLM responses are streamed token-by-token, the gateway maintains long-lived connections (HTTP/2 server-sent events or WebSocket) and proxies the stream directly to the client without buffering the full response
 
 **Technologies:**
-
-| Type | Options |
-|---|---|
-| Open Source | Kong, NGINX, Traefik, Envoy, Tyk |
-| Managed / Closed Source | AWS API Gateway, Google Apigee, Azure API Management, Cloudflare API Shield |
+- *Open Source* — Kong, NGINX, Traefik, Envoy, Tyk
+- *Managed / Closed Source* — AWS API Gateway, Google Apigee, Azure API Management, Cloudflare API Shield
 
 ---
 

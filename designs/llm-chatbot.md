@@ -1,13 +1,13 @@
 # LLM-Powered Chatbot
 
-## Problem Statement
+## 1. Problem Statement
 Design a basic chatbot system that accepts user messages, sends them to a Large Language Model (LLM), and streams back coherent responses - supporting multi-turn conversations with context retention.
 
 ---
 
-## Requirements
+## 2. Requirements
 
-### Functional
+### 2.1 Functional
 - Users can send messages and receive responses from an LLM
 - System maintains conversation history for multi-turn context
 - Responses are streamed back in real time
@@ -15,20 +15,20 @@ Design a basic chatbot system that accepts user messages, sends them to a Large 
 - Augment responses with relevant context via RAG
 - Filter unsafe or out-of-scope inputs and outputs via Guardrails
 
-### Non-Functional
+### 2.2 Non-Functional
 - Low latency first token response
 - Scalable to handle multiple concurrent users
 - Conversation history persisted across sessions
 
 ---
 
-## High-Level Architecture
+## 3. High-Level Architecture
 
 ![LLM Chatbot Architecture](../images/chat-service/chat_service.png)
 
 ---
 
-## Core Components
+## 4. Core Components
 
 | Component | Responsibility |
 |---|---|
@@ -47,16 +47,16 @@ Design a basic chatbot system that accepts user messages, sends them to a Large 
 
 ---
 
-## Component Deep Dive
+## 5. Component Deep Dive
 
-### Client
+### 5.1 Client
 The client is the interface through which users interact with the chatbot. It is responsible for capturing user input, sending it to the backend, and rendering the streamed response. Clients can take several forms:
 
 - **Web Browser** - a web app (React, Vue, etc.) that communicates with the backend over HTTP/WebSocket
 - **Mobile App** - a native iOS or Android app, or a cross-platform app (React Native, Flutter) that integrates the chat UI
 - **Embedded Chat Window** - a chat widget embedded inside another product (e.g. a customer support window, a docs site, or an IDE plugin)
 
-### API Gateway
+### 5.2 API Gateway
 The API Gateway is the single entry point for all client requests. It sits between the client and the backend services, handling cross-cutting concerns so the Chat Service does not have to. Key responsibilities include:
 
 - **Authentication & Authorization** - validates identity (JWT, API keys, OAuth tokens) and enforces access control before any request reaches the backend
@@ -76,7 +76,7 @@ The API Gateway is the single entry point for all client requests. It sits betwe
 - *Open Source* - Kong, NGINX, Traefik, Envoy, Tyk
 - *Managed / Closed Source* - AWS API Gateway, Google Apigee, Azure API Management, Cloudflare API Shield
 
-### Cache
+### 5.3 Cache
 The cache sits in front of the LLM and stores previous responses to avoid redundant and costly model calls. Rather than simple exact-match caching, this system uses **semantic caching** - meaning it can serve cached responses not just for identical queries but also for queries that are semantically similar.
 
 **How it works:**
@@ -132,7 +132,7 @@ Both figures exclude the network round-trip to the Redis Cluster (~0.1–1ms on 
 **Technologies:**
 - *Cache Store* - Redis with the RediSearch module (part of Redis Stack) for vector indexing and KNN search
 
-### RAG & Vector DB
+### 5.4 RAG & Vector DB
 **Retrieval-Augmented Generation (RAG)** is a technique that enhances LLM responses by injecting relevant external knowledge into the prompt at query time. Instead of relying solely on what the model learned during training, RAG fetches up-to-date, domain-specific context from a knowledge base - making the system more accurate, grounded, and easier to maintain without retraining the model.
 
 **How RAG helps the system:**
@@ -184,7 +184,7 @@ The same embedding model must be used at both ingestion and retrieval time - mix
 
 This adds overhead compared to a direct LLM call, but is substantially faster than retraining or fine-tuning and well within acceptable latency budgets given that LLM generation itself typically takes 500ms–several seconds.
 
-### Guardrails
+### 5.5 Guardrails
 The Guardrails layer is a dedicated content moderation service powered by a classification model that sits at two critical points in the pipeline - **before** the request reaches the LLM and **after** the LLM generates a response. It acts as the system's safety net, ensuring neither end of the conversation can be weaponised or misused.
 
 **Why this layer is absolutely necessary:**
@@ -225,7 +225,7 @@ Beyond safety, a well-tuned Guardrails layer directly improves the quality of th
 - *Open Source* - NeMo Guardrails (NVIDIA), Guardrails AI, LlamaGuard (Meta), Perspective API
 - *Managed / Closed Source* - Azure Content Safety, AWS Comprehend, OpenAI Moderation API
 
-### Model Router & Model Selection
+### 5.6 Model Router & Model Selection
 The Model Router is responsible for deciding which LLM should handle a given request. Rather than hardwiring every request to a single model, the router dynamically selects the most appropriate one based on a combination of signals - balancing cost, latency, capability, and data sensitivity. The routing decision is informed by a **Model Selection Model**, a lightweight classifier that evaluates the incoming request and recommends a model tier.
 
 **Why dynamic routing matters:**
@@ -264,7 +264,7 @@ Self-hosted models (e.g. LLaMA 3, Mistral, Falcon, Qwen) run on your own infrast
 - *Self-Hosted Inference* - vLLM, Ollama, TGI (Text Generation Inference by HuggingFace), Triton Inference Server
 - *External LLM Providers* - OpenAI, Anthropic, Google Vertex AI, Cohere, Mistral AI
 
-### LLM Serving - Self-Hosted & External Models
+### 5.7 LLM Serving - Self-Hosted & External Models
 Once the Model Router has made its decision, the request is forwarded to the selected model for final inference - the step where the actual response is generated. This is the most computationally intensive and latency-dominant part of the entire pipeline.
 
 **Self-Hosted Models:**
@@ -306,7 +306,7 @@ Key considerations for external models:
 - **Cost** - billed per input and output token; costs can scale significantly with context length, especially when RAG payloads or long conversation histories are included in every request
 - **Model versioning** - providers periodically update or retire model versions; the system must handle version pinning and migration gracefully to avoid unexpected behaviour changes
 
-### Chat Service
+### 5.8 Chat Service
 The Chat Service is the central orchestrator and the brain of the entire system. It is the only component that communicates with every other layer - the API Gateway, Cache, RAG, Guardrails, and Model Router - and is responsible for coordinating them in the right sequence to produce a coherent, safe, and contextually aware response. No other component has awareness of the full request lifecycle; the Chat Service holds it all together.
 
 **Session & Conversation Management:**
@@ -370,7 +370,7 @@ Since the Chat Service touches every component, it is the natural place to emit 
 
 ---
 
-## Data Flow
+## 6. Data Flow
 
 1. **User sends a message** - the client (web, mobile, or embedded widget) captures the user's input and sends it to the backend over HTTP or a WebSocket connection, along with a session identifier to associate the message with an ongoing conversation.
 
@@ -398,7 +398,7 @@ Since the Chat Service touches every component, it is the natural place to emit 
 
 ---
 
-## Trade-offs & Considerations
+## 7. Trade-offs & Considerations
 
 - **RAG vs. fine-tuning** - RAG is easier to keep up to date but adds retrieval latency; fine-tuning bakes knowledge into the model but requires retraining cycles
 - **Model routing** - routing to cheaper or self-hosted models reduces cost but may affect response quality for complex queries

@@ -24,7 +24,7 @@ Design a basic chatbot system that accepts user messages, sends them to a Large 
 
 ## High-Level Architecture
 
-![LLM Chatbot Architecture](images/chat-service/chat_service.png)
+![LLM Chatbot Architecture](../images/chat-service/chat_service.png)
 
 ---
 

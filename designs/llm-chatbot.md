@@ -621,11 +621,199 @@ The Chat Service is the natural enforcement point for tenant isolation:
 
 ---
 
-## 8. Observability & Monitoring
+## 8. API Design
+
+The client interacts with the Chat Service through a single endpoint. This minimal surface area keeps client integration trivial while still supporting every feature discussed - streaming, session continuity, tool use, model preference, citations, and guardrail outcomes. All responses stream over Server-Sent Events; sessions, tool use, and routing preferences are controlled via request body fields rather than separate endpoints.
+
+### 8.1 Endpoint
+
+```
+POST /v1/chat
+```
+
+One endpoint, one method. POST is used because every request mutates state (new message appended to the session, telemetry written, cache populated). All responses are streamed - the API does not support a buffered response mode.
+
+### 8.2 Request
+
+**Headers:**
+
+| Header | Required | Purpose |
+|---|---|---|
+| `Authorization: Bearer <token>` | Yes | JWT or API key |
+| `Content-Type: application/json` | Yes | Request body format |
+| `Accept: text/event-stream` | Yes | Signals SSE response |
+| `X-Idempotency-Key` | Recommended | Client-generated UUID for safe retries |
+| `X-Tenant-Id` | Multi-tenant only | Tenant scope (for service-account callers) |
+| `X-Request-Id` | Optional | Client-supplied correlation ID; server generates one if absent |
+
+**Body:**
+
+```json
+{
+  "session_id": "sess_abc123",
+  "message": "What is the refund policy for international orders?",
+  "options": {
+    "model_preference": "auto",
+    "max_output_tokens": 2048,
+    "temperature": 0.7,
+    "use_rag": true,
+    "use_cache": true
+  },
+  "tools": [
+    {
+      "name": "lookup_order",
+      "description": "Look up an order by its ID",
+      "parameters": { }
+    }
+  ],
+  "metadata": {
+    "client_version": "web-1.4.2",
+    "locale": "en-GB"
+  }
+}
+```
+
+**Field semantics:**
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `session_id` | string | No | If omitted, server creates a new session and returns its ID |
+| `message` | string | Yes | The user's input |
+| `options.model_preference` | string | No | `auto` (router decides) or an explicit model alias |
+| `options.max_output_tokens` | int | No | Cap on generated output length |
+| `options.temperature` | float | No | Sampling temperature; server-clamped to a safe range |
+| `options.use_rag` | bool | No (default `true`) | Allow opting out of RAG (rare) |
+| `options.use_cache` | bool | No (default `true`) | Allow bypassing the semantic cache |
+| `tools` | array | No | Tool / function-calling definitions for this turn |
+| `metadata` | object | No | Free-form client context, surfaced in observability |
+
+### 8.3 Response (SSE)
+
+The server returns `HTTP 200 OK` and emits an SSE event stream:
+
+```
+event: session
+data: {"session_id": "sess_abc123", "message_id": "msg_xyz789"}
+
+event: token
+data: {"delta": "International "}
+
+event: token
+data: {"delta": "orders can be returned within 60 days."}
+
+event: citations
+data: {"citations": [{"document_id": "policy_42", "title": "Returns Policy", "url": "..."}]}
+
+event: usage
+data: {"input_tokens": 412, "output_tokens": 38, "model": "claude-sonnet-4-5", "cached": false}
+
+event: done
+data: {"finish_reason": "stop"}
+```
+
+**Event types:**
+
+| Event | Purpose |
+|---|---|
+| `session` | First event; carries `session_id` and `message_id` for resumption |
+| `token` | A streamed token delta |
+| `tool_call` | Model requested a tool invocation (when tools are in use) |
+| `citations` | Source attributions (when RAG was used) |
+| `usage` | Token counts, model chosen, cache status; emitted near end |
+| `done` | Stream terminator with finish reason |
+| `error` | Stream-level error; followed by connection close |
+
+### 8.4 HTTP Status Codes
+
+| Code | Meaning | When |
+|---|---|---|
+| `200 OK` | Success | Stream opened successfully |
+| `201 Created` | New session created | Returned when no `session_id` was supplied |
+| `202 Accepted` | Queued | Reserved for async/batched flows (future) |
+| `400 Bad Request` | Malformed input | Invalid JSON, missing required fields, schema violation |
+| `401 Unauthorized` | Auth failed | Missing or invalid token |
+| `403 Forbidden` | Policy violation | Caller not entitled to the requested model or feature |
+| `404 Not Found` | Session not found | Provided `session_id` does not exist or has expired |
+| `409 Conflict` | Concurrent write | Two requests racing on the same session; retry |
+| `413 Payload Too Large` | Oversized request | Message exceeds size limit |
+| `422 Unprocessable Entity` | Guardrail rejection | Input or output blocked by Guardrails |
+| `429 Too Many Requests` | Rate or budget limit | Includes `Retry-After` header |
+| `499 Client Closed Request` | Client disconnect | Client cut the connection mid-stream (logged, not surfaced) |
+| `500 Internal Server Error` | Unexpected failure | Bug or unhandled exception |
+| `502 Bad Gateway` | Upstream error | All routed LLM providers failed |
+| `503 Service Unavailable` | Service degraded | Maintenance, overload, no healthy LLM endpoint |
+| `504 Gateway Timeout` | Upstream timeout | LLM provider exceeded the request budget |
+| `529` | Overloaded | Provider overload signal surfaced from upstream |
+
+### 8.5 Error Response Format
+
+All non-2xx responses (and `error` SSE events) follow a consistent envelope:
+
+```json
+{
+  "error": {
+    "code": "GUARDRAIL_INPUT_BLOCKED",
+    "category": "prompt_injection",
+    "message": "Your message could not be processed.",
+    "request_id": "req_8h2bc9",
+    "retry_after_seconds": null
+  }
+}
+```
+
+- `code` - stable machine-readable identifier (see 8.6)
+- `category` - secondary classification when relevant (e.g., `pii`, `toxicity`)
+- `message` - human-safe description (never leaks system internals or prompts)
+- `request_id` - correlation ID for support and observability
+- `retry_after_seconds` - present on `429` responses; absent otherwise
+
+### 8.6 Application Error Codes
+
+| Code | HTTP | Description |
+|---|---|---|
+| `INVALID_REQUEST` | 400 | Schema or field validation failed |
+| `AUTH_INVALID` | 401 | Token malformed or unrecognised |
+| `AUTH_EXPIRED` | 401 | Token expired; client should refresh |
+| `FORBIDDEN_MODEL` | 403 | Tenant not permitted to use requested model |
+| `FORBIDDEN_FEATURE` | 403 | Feature (e.g., tool use) disabled for tenant |
+| `SESSION_NOT_FOUND` | 404 | Unknown or expired `session_id` |
+| `SESSION_CONFLICT` | 409 | Concurrent request on same session |
+| `PAYLOAD_TOO_LARGE` | 413 | Input exceeds server limit |
+| `GUARDRAIL_INPUT_BLOCKED` | 422 | Input rejected; `category` discloses why (`prompt_injection`, `pii`, `toxicity`, `off_topic`, `policy`) |
+| `GUARDRAIL_OUTPUT_BLOCKED` | 422 | Generated response blocked mid-stream; truncated text returned |
+| `CONTEXT_TOO_LARGE` | 422 | History + new message exceeds even the largest available model's context |
+| `RATE_LIMIT_EXCEEDED` | 429 | Per-user or per-tenant request rate limit hit |
+| `BUDGET_EXCEEDED` | 429 | Token or cost budget exhausted for tenant/user |
+| `MODEL_UNAVAILABLE` | 502 | All routed and fallback LLMs unavailable |
+| `TOOL_CALL_FAILED` | 502 | An invoked tool returned an error |
+| `UPSTREAM_TIMEOUT` | 504 | LLM provider exceeded latency budget |
+| `INTERNAL_ERROR` | 500 | Unexpected server failure |
+
+### 8.7 Streaming Cancellation
+
+Clients cancel an in-flight stream by closing the underlying HTTP/2 stream (or aborting the `fetch`). The Chat Service:
+1. Detects the cancellation
+2. Propagates a cancel to the LLM provider (where supported) to release GPU capacity
+3. Persists the partial response so a future request can resume from it
+4. Emits a `cancelled` outcome to observability
+
+The logged HTTP status is `499 Client Closed Request` - informational, not an error.
+
+### 8.8 Idempotency
+
+The optional `X-Idempotency-Key` header (client-generated UUID) lets clients safely retry a request after a network failure without risking duplicate generations:
+
+- The server stores the `(key, response)` pair in Redis for a short TTL (e.g., 24 hours)
+- A retry with the same key returns the cached response (or replays the stream)
+- The client must generate a new key per user-initiated submit, not per retry - otherwise legitimate new requests will be served stale responses
+
+---
+
+## 9. Observability & Monitoring
 
 LLM systems have unique observability needs - in addition to traditional service metrics (latency, errors, throughput), we must observe model behaviour (token usage, quality, drift, guardrail outcomes, cost). The Chat Service is the natural emission point for end-to-end request-level telemetry.
 
-### 8.1 Logs
+### 9.1 Logs
 
 Structured JSON logs per request, correlated by `request_id`, `session_id`, `tenant_id`, `user_id` (hashed):
 
@@ -642,7 +830,7 @@ Structured JSON logs per request, correlated by `request_id`, `session_id`, `ten
 
 **Prompt & response logging:** Full prompts and responses should be logged conditionally (sampled, or always-on for flagged tenants), with PII redaction and tenant-scoped access control. This is non-negotiable for debugging quality issues but is a privacy-sensitive surface - treat with the same care as a credentials log.
 
-### 8.2 Metrics
+### 9.2 Metrics
 
 Time-series metrics exposed via Prometheus, OpenTelemetry, or equivalent. Standard service metrics (RED - Rate, Errors, Duration) plus LLM-specific:
 
@@ -678,7 +866,7 @@ Time-series metrics exposed via Prometheus, OpenTelemetry, or equivalent. Standa
 - `routing_decisions_total` (by chosen_model, signal)
 - `routing_fallback_total` (by primary_model, fallback_model, reason)
 
-### 8.3 Traces
+### 9.3 Traces
 
 Distributed tracing via OpenTelemetry; one trace per user request, spanning the API Gateway, Chat Service, Guardrails, RAG, Cache, and LLM call. Spans include:
 
@@ -692,7 +880,7 @@ Distributed tracing via OpenTelemetry; one trace per user request, spanning the 
 
 Trace backends: Jaeger, Tempo, Datadog APM, Honeycomb, New Relic.
 
-### 8.4 LLM-Specific Observability Platforms
+### 9.4 LLM-Specific Observability Platforms
 
 A new category of LLM observability tools provides purpose-built support beyond generic APM:
 
@@ -701,7 +889,7 @@ A new category of LLM observability tools provides purpose-built support beyond 
 
 These tools add prompt-version-aware tracing, response evaluation dashboards, cost breakdowns by tenant/model, and integration with eval pipelines.
 
-### 8.5 Cost Observability
+### 9.5 Cost Observability
 
 LLM systems can accrue cost in surprising, fast-moving ways. Cost telemetry is first-class:
 
@@ -713,9 +901,9 @@ LLM systems can accrue cost in surprising, fast-moving ways. Cost telemetry is f
 
 ---
 
-## 9. Alerting & SLOs
+## 10. Alerting & SLOs
 
-### 9.1 Service Level Indicators (SLIs)
+### 10.1 Service Level Indicators (SLIs)
 
 The measured signals that we care about:
 
@@ -727,7 +915,7 @@ The measured signals that we care about:
 - **Guardrails false-positive SLI** - human-reviewed false positives / total blocks (target lower bound)
 - **Quality SLI** - LLM-as-judge or human-eval score on a sampled audit set
 
-### 9.2 Service Level Objectives (SLOs)
+### 10.2 Service Level Objectives (SLOs)
 
 Internal targets backed by error budgets:
 
@@ -742,7 +930,7 @@ Internal targets backed by error budgets:
 
 Each SLO has an error budget. Burn rate alerts fire on fast (5m) and slow (1h, 6h) burn windows per Google SRE practice.
 
-### 9.3 Alerting Strategy
+### 10.3 Alerting Strategy
 
 Two tiers of alerts:
 
@@ -762,7 +950,7 @@ Two tiers of alerts:
 
 **Anti-pattern to avoid:** alerting on every classifier flag or every model error. These should drive dashboards and tickets, not pages. Alerts must be actionable and reversible.
 
-### 9.4 Runbook Discipline
+### 10.4 Runbook Discipline
 
 Each alert is linked to a runbook with:
 - The metric being measured and its threshold
@@ -775,11 +963,11 @@ Synthetic monitoring runs canary conversations end-to-end every minute from mult
 
 ---
 
-## 10. Evaluation & Quality
+## 11. Evaluation & Quality
 
 Quality cannot be measured by uptime alone. LLM systems require continuous evaluation across multiple dimensions.
 
-### 10.1 Offline Evals
+### 11.1 Offline Evals
 
 Run before every deploy and on every prompt or model change:
 
@@ -790,17 +978,17 @@ Run before every deploy and on every prompt or model change:
 
 **Eval frameworks (2026-current):** LangSmith, Braintrust, Arize Phoenix, Ragas, DeepEval, OpenAI Evals, Helicone, Patronus AI.
 
-### 10.2 Online Evals & A/B Testing
+### 11.2 Online Evals & A/B Testing
 
 - Shadow traffic - the new prompt/model runs in parallel with production; responses are compared but only production responses are returned to users
 - A/B testing - traffic is split between variants; aggregate metrics (CSAT, completion rate, follow-up rate, cost) compared
 - Canary rollout - new versions exposed to 1% → 10% → 100% with automatic rollback on quality regression
 
-### 10.3 LLM-as-Judge
+### 11.3 LLM-as-Judge
 
 Use a strong model (often a frontier model from a different provider than the production one, to avoid same-model bias) to grade response quality on dimensions like correctness, helpfulness, groundedness, safety, and tone. LLM-as-judge correlates well with human judgement at a fraction of the cost - but must be calibrated against periodic human review.
 
-### 10.4 Continuous Quality Monitoring
+### 11.4 Continuous Quality Monitoring
 
 - Sample 1-5% of production traffic for ongoing automated grading
 - Flag low-scoring responses for human review
@@ -809,16 +997,16 @@ Use a strong model (often a frontier model from a different provider than the pr
 
 ---
 
-## 11. Security
+## 12. Security
 
-### 11.1 Data Protection
+### 12.1 Data Protection
 
 - **In transit** - TLS 1.3 everywhere; mTLS for service-to-service inside the mesh
 - **At rest** - encryption with customer-managed keys (KMS, HSM-backed) for session stores, vector DB, and logs
 - **PII minimisation** - detect and redact PII at the edge (Microsoft Presidio or equivalent) before logging or routing to external providers
 - **Right to deletion (GDPR DSR)** - data deletion APIs that propagate to all stores including the semantic cache and vector embeddings (re-ingestion required for affected documents)
 
-### 11.2 Threat Model
+### 12.2 Threat Model
 
 Specific to LLM systems:
 
@@ -828,7 +1016,7 @@ Specific to LLM systems:
 - **Tool abuse** - LLM persuaded to call tools maliciously. Mitigations: scoped tool credentials, human-in-the-loop for sensitive tools, audit logs for all tool invocations
 - **Supply chain** - compromised model weights, dependency vulnerabilities in serving infra. Mitigations: model signing, SBOM tracking, vulnerability scanning
 
-### 11.3 Audit & Compliance
+### 12.3 Audit & Compliance
 
 - Immutable audit logs for guardrail decisions, routing decisions, and tool invocations
 - Access control: who can see which conversations, who can change prompts, who can deploy models
@@ -837,7 +1025,7 @@ Specific to LLM systems:
 
 ---
 
-## 12. Scalability & Capacity Planning
+## 13. Scalability & Capacity Planning
 
 The chat pipeline has very different scaling characteristics per component:
 
@@ -865,40 +1053,40 @@ The chat pipeline has very different scaling characteristics per component:
 
 ---
 
-## 13. Trade-offs & Considerations
+## 14. Trade-offs & Considerations
 
-### 13.1 RAG vs. Fine-Tuning
+### 14.1 RAG vs. Fine-Tuning
 RAG and fine-tuning are both ways to specialise a model for a domain, but they serve different needs. RAG keeps knowledge external and updatable - adding new documents to the Vector DB immediately improves responses without touching the model. Fine-tuning bakes knowledge into the model's weights, which produces faster inference (no retrieval step) and better stylistic alignment, but requires expensive retraining every time the knowledge changes. For most production chatbots, RAG is the default; fine-tuning is reserved for cases where response style, tone, or domain vocabulary needs deep alignment that prompting alone cannot achieve. A hybrid - RAG on top of a lightly fine-tuned model - is increasingly common for high-stakes deployments.
 
-### 13.2 Semantic Cache Threshold - Accuracy vs. Hit Rate
+### 14.2 Semantic Cache Threshold - Accuracy vs. Hit Rate
 The similarity threshold dials directly between response accuracy and cache efficiency. A high threshold (≥ 0.95) serves only genuinely equivalent queries; low hit rate, low risk. A low threshold (< 0.85) maximises reuse but risks returning a response that misses the user's intent. Tune empirically against a labelled validation set per tenant. Cached responses do not reflect knowledge updates after write time, so TTL management and version tagging are critical.
 
-### 13.3 Guardrails - Safety vs. Latency
+### 14.3 Guardrails - Safety vs. Latency
 Every guardrail check adds latency. Running synchronous input and output checks adds two blocking round-trips to the critical path. For safety-critical deployments, this is non-negotiable. For lower-risk internal tools, output guardrails can run asynchronously (log-and-flag rather than block), trading safety for speed. Lighter classifier models or windowed evaluation of streaming output offer middle-ground options. The right balance depends entirely on the deployment's risk profile.
 
-### 13.4 Model Routing - Quality vs. Cost vs. Latency
+### 14.4 Model Routing - Quality vs. Cost vs. Latency
 Routing sits at the intersection of three competing forces. Sending every request to the frontier model maximises quality but is prohibitively expensive. Routing everything to the cheapest model reduces cost but degrades responses on complex queries. Latency adds a third dimension - a fast mid-tier model often produces a better user experience than a slower frontier model. Misrouting - especially under-routing complex queries - is invisible in metrics until quality dashboards or user feedback catches it. Continuous evaluation is the only reliable guardrail.
 
-### 13.5 Self-Hosted vs. External LLMs
+### 14.5 Self-Hosted vs. External LLMs
 Self-hosted models give full control over data, cost structure, and latency, but come with significant operational burden - GPU infrastructure, model versioning, scaling, capacity planning, on-call. External providers offload all of that in exchange for per-token cost, third-party data exposure, and dependence on provider availability and pricing. For most startups, external providers are the right default. For enterprises handling sensitive data or operating at very high token volumes, self-hosted becomes increasingly attractive. The most common production pattern is hybrid - external for general traffic, self-hosted for sensitive or high-volume workloads, with the Router enforcing the boundary.
 
-### 13.6 Context Window Management - Truncation vs. Summarisation
+### 14.6 Context Window Management - Truncation vs. Summarisation
 Truncation (drop oldest messages) is cheap but loses context. Summarisation preserves continuity but adds latency (an extra LLM call) and risks information loss in the summary. Truncation is the simpler engineering choice; summarisation is the better experience. A hybrid - truncate by default, summarise when the session ages past a threshold - works well in practice. Provider-side prompt caching makes summarisation cheaper than it used to be, since the summary becomes a stable prefix that gets cached.
 
-### 13.7 Streaming vs. Buffered Responses
+### 14.7 Streaming vs. Buffered Responses
 Streaming dramatically reduces perceived latency but adds meaningful infrastructure complexity - long-lived connections, partial-output guardrails, mid-stream error handling. For conversational UX, streaming is almost always worth it. For API integrations that need structured outputs or downstream parsing, buffered responses are simpler and safer. Both can coexist if the API supports an opt-in `stream: true` flag.
 
-### 13.8 Vector Index - Recall vs. Speed
+### 14.8 Vector Index - Recall vs. Speed
 FLAT guarantees finding true nearest neighbours but scans linearly; impractical beyond ~100K vectors. HNSW finds approximate nearest neighbours in O(log n) with 95-99% recall - the production standard at scale. The small recall gap means HNSW may occasionally miss a relevant chunk or cache entry; monitor retrieval quality as the index grows, and tune HNSW parameters (`M`, `efConstruction`, `efRuntime`) to dial recall vs. latency.
 
-### 13.9 Embedding Model - Quality vs. Cost vs. Latency
+### 14.9 Embedding Model - Quality vs. Cost vs. Latency
 All vector search quality depends on the embedding model. Larger models produce richer representations and higher retrieval quality but cost more per call and consume more storage. Smaller models are fast, cheap, and compact but miss subtle semantic similarities. Critically, the same model must be used at both ingestion and query time; switching requires re-embedding the entire corpus, which is a costly migration. Embedding model choice should be treated as a long-term infrastructure commitment. Matryoshka embeddings offer some escape - the same model produces variable-dimension vectors, so you can scale storage down without changing models.
 
-### 13.10 Prompt Caching - Stability vs. Personalisation
+### 14.10 Prompt Caching - Stability vs. Personalisation
 Provider-side prompt caching offers up to 90% cost reduction and significant latency improvement on the cached prefix - but only when prefixes are stable. Structuring prompts for maximum cache hit (stable elements first, volatile elements last) sometimes conflicts with structuring prompts for maximum quality (recency-weighted, personalised). For most deployments, the cost savings justify the discipline; for highly personalised assistants, the structure can be relaxed selectively.
 
-### 13.11 Build vs. Buy for Orchestration
+### 14.11 Build vs. Buy for Orchestration
 LangGraph, LlamaIndex, Semantic Kernel, and DSPy provide pre-built abstractions for prompt management, RAG pipelines, memory, and tool use. They accelerate prototyping but their abstractions can become constraints at scale - debugging, performance tuning, and version pinning often become harder. Custom orchestration (FastAPI, Go) offers full control at the cost of building everything yourself. A common pattern is to start on a framework, then graduate to custom code once the system's specific requirements are clear and the abstractions start to cost more than they save.
 
-### 13.12 MCP vs. Custom Tool Integration
+### 14.12 MCP vs. Custom Tool Integration
 MCP (Model Context Protocol) standardises how tools and resources are exposed to LLM-driven systems, removing the need to build a bespoke integration per model and per tool. The ecosystem is young but growing fast. Adopting MCP makes the Chat Service portable across models and clients but introduces a protocol dependency and currently lags some custom integrations on advanced features. For new builds in 2026, MCP is the default; for systems with deeply customised tool flows, custom integration may still win short term.

@@ -253,7 +253,7 @@ The Model Selection Model evaluates each request across several signals to deter
 - **ML-based routing** - a lightweight classifier (the Model Selection Model) scores the request and selects a model; more adaptive but introduces a small classification overhead (~10–30ms)
 - **Hybrid** - rule-based filters handle obvious cases (data sensitivity, context length) while the ML classifier handles nuanced task complexity decisions
 
-**Self-Hosted vs External LLMs:**
+**Self-Hosted vs External LLMs for Model Routing:**
 
 Self-hosted models (e.g. LLaMA 3, Mistral, Falcon, Qwen) run on your own infrastructure, which means data never leaves your environment - making them the right choice for sensitive workloads, regulated industries, or scenarios with strict data residency requirements. They offer lower and more predictable latency since there is no external API hop, and costs are fixed regardless of usage volume. The trade-off is operational overhead: the team is responsible for hosting, scaling, and keeping models up to date. External providers (e.g. OpenAI GPT-4o, Anthropic Claude, Google Gemini) on the other hand offer state-of-the-art capabilities with zero infrastructure burden and a simple pay-per-token model - but every request sends data to a third-party, which may be unacceptable depending on compliance constraints.
 

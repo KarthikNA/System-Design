@@ -306,6 +306,68 @@ Key considerations for external models:
 - **Cost** - billed per input and output token; costs can scale significantly with context length, especially when RAG payloads or long conversation histories are included in every request
 - **Model versioning** - providers periodically update or retire model versions; the system must handle version pinning and migration gracefully to avoid unexpected behaviour changes
 
+### Chat Service
+The Chat Service is the central orchestrator and the brain of the entire system. It is the only component that communicates with every other layer - the API Gateway, Cache, RAG, Guardrails, and Model Router - and is responsible for coordinating them in the right sequence to produce a coherent, safe, and contextually aware response. No other component has awareness of the full request lifecycle; the Chat Service holds it all together.
+
+**Session & Conversation Management:**
+
+Every user interaction belongs to a session. The Chat Service is responsible for maintaining the state of that session across turns:
+- On each incoming request, it retrieves the conversation history for the session from the session store (Redis for recent context, persistent DB for full history)
+- It tracks the running token count of the conversation and decides when to truncate older messages or trigger a summarisation pass to stay within the model's context window
+- Session metadata (user ID, session ID, timestamps, model used) is persisted to allow resuming conversations across connections or devices
+
+**Prompt Construction:**
+
+One of the Chat Service's most critical responsibilities is assembling the final prompt that gets sent to the LLM. This is not just appending the user's message - it is a deliberate composition of multiple inputs:
+1. **System prompt** - defines the assistant's persona, tone, scope, and any hard rules (e.g. "You are a customer support agent for X. Do not discuss competitors.")
+2. **RAG context** - relevant document chunks retrieved from the Vector DB, injected as grounding context before the conversation
+3. **Conversation history** - prior turns in the session, managed and trimmed to fit within the context window budget
+4. **User message** - the current user input, appended last
+
+The order and formatting of these blocks meaningfully affect output quality. The Chat Service applies prompt templates that are versioned and tunable independently of the model.
+
+**Orchestration Flow:**
+
+The Chat Service drives the full request lifecycle in a defined sequence:
+1. Receive request from the API Gateway
+2. Load session history from the store
+3. Check the semantic cache - return immediately if a hit is found
+4. Run input Guardrails on the user message - reject or flag if needed
+5. Trigger RAG retrieval in parallel where possible to minimise latency
+6. Construct the final prompt from all assembled inputs
+7. Forward to the Model Router, which selects and calls the appropriate LLM
+8. Stream tokens back from the LLM as they arrive
+9. Run output Guardrails on the response stream before forwarding to the client
+10. Persist the new message pair to the session store and cache
+
+**Context Window Management:**
+
+As conversations grow, the accumulated history can exceed the model's context window limit. The Chat Service handles this through:
+- **Sliding window** - retains only the most recent N turns and drops the oldest
+- **Summarisation** - compresses older turns into a short summary that is prepended to the context, preserving continuity without consuming the full token budget
+- **Token counting** - tracks tokens per message using the same tokeniser as the target model to ensure the assembled prompt never exceeds the limit before dispatch
+
+**Streaming:**
+
+The Chat Service does not wait for the full LLM response before forwarding to the client. It opens a streaming connection to the LLM and pipes tokens through to the client via the API Gateway in real time - using Server-Sent Events (SSE) or WebSocket. This dramatically reduces perceived latency since the user sees the response begin appearing within the first few hundred milliseconds, even for long outputs.
+
+**Error Handling & Fallbacks:**
+
+The Chat Service is responsible for graceful degradation when things go wrong:
+- If the primary LLM is rate-limited or unavailable, it retries with exponential backoff or falls back to an alternative model via the Model Router
+- If RAG retrieval fails, the request proceeds without context augmentation rather than failing entirely
+- If Guardrails flag an input or output, the Chat Service returns a structured refusal message rather than an empty or broken response
+
+**Observability:**
+
+Since the Chat Service touches every component, it is the natural place to emit structured logs, metrics, and traces for the entire request lifecycle - including latency per stage, model used, token counts, cache hit/miss, and guardrail outcomes. This data feeds dashboards, alerting, and cost attribution.
+
+**Technologies:**
+- *Orchestration Frameworks* - LangChain, LlamaIndex, Semantic Kernel (provide pre-built abstractions for prompt management, RAG pipelines, memory, and tool use)
+- *Custom Services* - FastAPI or Node.js for teams that prefer full control over the orchestration logic without framework abstractions
+- *Session Store* - Redis (short-term context), PostgreSQL (full conversation history)
+- *Streaming* - Server-Sent Events (SSE) or WebSocket for real-time token delivery to the client
+
 ---
 
 ## Data Flow

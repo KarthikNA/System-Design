@@ -372,17 +372,29 @@ Since the Chat Service touches every component, it is the natural place to emit 
 
 ## Data Flow
 
-1. User sends a message from the client
-2. API Gateway authenticates the request and forwards it to the Chat Service
-3. Chat Service checks the Cache for an existing response to the query
-4. If a cache miss, Guardrails validates the input against safety and policy rules
-5. Chat Service queries RAG, which performs a semantic search against the Vector DB to fetch relevant context
-6. Chat Service builds the final prompt (system prompt + retrieved context + conversation history + user message)
-7. Model Router selects the appropriate LLM (self-hosted or external) using the Model Selection Model
-8. The selected LLM generates a response, which is streamed back to the Chat Service
-9. Guardrails validates the LLM output before it is returned
-10. Chat Service streams the response back to the client via the API Gateway
-11. Response is stored in Cache for future reuse
+1. **User sends a message** - the client (web, mobile, or embedded widget) captures the user's input and sends it to the backend over HTTP or a WebSocket connection, along with a session identifier to associate the message with an ongoing conversation.
+
+2. **API Gateway processes the request** - the gateway handles SSL/TLS termination, authenticates the request (JWT, API key, or OAuth token), checks rate limits and IP rules, and inspects the request for any obviously malformed or oversized payloads. If all checks pass, it routes the request to the Chat Service and keeps the connection open for streaming.
+
+3. **Chat Service loads session context** - the Chat Service retrieves the conversation history for the session from Redis (recent turns) and the persistent DB (full history if needed). It counts the running token total and applies truncation or summarisation if the history approaches the model's context window limit.
+
+4. **Semantic cache lookup** - the Chat Service embeds the incoming query using the configured embedding model and runs a KNN similarity search against previously cached query embeddings in Redis. If a match above the similarity threshold is found, the cached response is streamed back immediately to the client, skipping all downstream components entirely.
+
+5. **Input Guardrails** - on a cache miss, the user message is passed through the input Guardrails layer. The Guardrails model checks for prompt injection attempts, jailbreaking patterns, out-of-scope topics, and PII. If the message is flagged, a structured refusal is returned to the client and the request goes no further.
+
+6. **RAG retrieval** - the Chat Service embeds the query and dispatches a semantic search to the Vector DB to retrieve the top-K most relevant document chunks. Retrieved chunks are ranked by relevance score and the highest-scoring ones are selected to be injected as grounding context into the prompt.
+
+7. **Prompt construction** - the Chat Service assembles the final prompt in a structured order: the system prompt (persona, scope, rules), followed by the RAG-retrieved context chunks, followed by the trimmed conversation history, and finally the user's current message. This fully composed prompt is what gets dispatched to the LLM.
+
+8. **Model Router selects the LLM** - the Model Router evaluates the request using the Model Selection Model, scoring it across signals such as task complexity, query intent, token count, and data sensitivity. Based on this, it selects the most appropriate model - routing privacy-sensitive requests to a self-hosted model and complex or general-purpose requests to an external provider.
+
+9. **LLM generates and streams the response** - the selected model receives the prompt and begins generating a response token by token. The Chat Service receives the token stream in real time and immediately begins forwarding it downstream, without waiting for the full response to complete.
+
+10. **Output Guardrails** - as tokens stream in, the output Guardrails layer inspects the response for toxicity, hate speech, PII leakage, hallucinations inconsistent with the RAG context, and policy violations. If the output is flagged mid-stream, the stream is interrupted and a safe fallback message is returned to the client.
+
+11. **Response streamed to the client** - clean tokens are forwarded through the API Gateway to the client in real time via SSE or WebSocket. The user sees the response begin appearing almost immediately after the first token is generated, minimising perceived latency.
+
+12. **Session and cache updated** - once the full response has been delivered, the Chat Service persists the new message pair (user message + assistant response) to the session store and the persistent DB. The query embedding and response are also written to the Redis cache with a TTL, making them available for future semantic cache hits.
 
 ---
 

@@ -47,6 +47,17 @@ Design a basic chatbot system that accepts user messages, sends them to a Large 
 
 ---
 
+## Component Deep Dive
+
+### Client
+The client is the interface through which users interact with the chatbot. It is responsible for capturing user input, sending it to the backend, and rendering the streamed response. Clients can take several forms:
+
+- **Web Browser** — a web app (React, Vue, etc.) that communicates with the backend over HTTP/WebSocket
+- **Mobile App** — a native iOS or Android app, or a cross-platform app (React Native, Flutter) that integrates the chat UI
+- **Embedded Chat Window** — a chat widget embedded inside another product (e.g. a customer support window, a docs site, or an IDE plugin)
+
+---
+
 ## Data Flow
 
 1. User sends a message from the client

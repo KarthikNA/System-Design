@@ -225,6 +225,45 @@ Beyond safety, a well-tuned Guardrails layer directly improves the quality of th
 - *Open Source* — NeMo Guardrails (NVIDIA), Guardrails AI, LlamaGuard (Meta), Perspective API
 - *Managed / Closed Source* — Azure Content Safety, AWS Comprehend, OpenAI Moderation API
 
+### Model Router & Model Selection
+The Model Router is responsible for deciding which LLM should handle a given request. Rather than hardwiring every request to a single model, the router dynamically selects the most appropriate one based on a combination of signals — balancing cost, latency, capability, and data sensitivity. The routing decision is informed by a **Model Selection Model**, a lightweight classifier that evaluates the incoming request and recommends a model tier.
+
+**Why dynamic routing matters:**
+
+Not every query needs the most powerful (and expensive) model. A simple FAQ lookup does not warrant the same compute as a complex multi-step reasoning task. Dynamic routing allows the system to:
+- Serve simple queries with cheaper, faster models to reduce cost and latency
+- Reserve high-capability models for complex or ambiguous requests
+- Route sensitive or private data to self-hosted models to meet data residency or compliance requirements
+- Gracefully fall back to an alternative model if the primary is unavailable or rate-limited
+
+**Routing Criteria:**
+
+The Model Selection Model evaluates each request across several signals to determine the best routing target:
+
+- **Task complexity** — classifies the query as simple (factual lookup, short answer) or complex (reasoning, code generation, multi-step tasks) and routes accordingly
+- **Query intent / task type** — identifies the nature of the request (summarisation, code, translation, conversation) and maps it to a model best suited for that task
+- **Cost** — cheaper models (e.g. smaller open-source or quantised models) are preferred for lower-complexity requests to control spend
+- **Latency requirements** — time-sensitive interactions (e.g. live chat) may prefer a faster model even at the cost of some quality
+- **Data sensitivity** — requests containing PII or confidential data are flagged and routed to self-hosted models to avoid sending sensitive content to third-party APIs
+- **Context length** — requests with long conversation histories or large RAG payloads are routed to models with larger context windows
+
+**Routing Strategies:**
+
+- **Rule-based routing** — simple, deterministic rules (e.g. *"if token count > 4000, route to model X"*); fast and predictable but inflexible
+- **ML-based routing** — a lightweight classifier (the Model Selection Model) scores the request and selects a model; more adaptive but introduces a small classification overhead (~10–30ms)
+- **Hybrid** — rule-based filters handle obvious cases (data sensitivity, context length) while the ML classifier handles nuanced task complexity decisions
+
+**Self-Hosted vs External LLMs:**
+
+Self-hosted models (e.g. LLaMA 3, Mistral, Falcon, Qwen) run on your own infrastructure, which means data never leaves your environment — making them the right choice for sensitive workloads, regulated industries, or scenarios with strict data residency requirements. They offer lower and more predictable latency since there is no external API hop, and costs are fixed regardless of usage volume. The trade-off is operational overhead: the team is responsible for hosting, scaling, and keeping models up to date. External providers (e.g. OpenAI GPT-4o, Anthropic Claude, Google Gemini) on the other hand offer state-of-the-art capabilities with zero infrastructure burden and a simple pay-per-token model — but every request sends data to a third-party, which may be unacceptable depending on compliance constraints.
+
+**Data residency** is a particularly significant driver of routing decisions. Regulations such as GDPR, HIPAA, or country-specific data sovereignty laws may mandate that certain data never crosses regional boundaries or leaves the organisation's own infrastructure entirely. In such cases, the Model Router must be aware of data classification and routing rules — ensuring requests flagged as sensitive or region-restricted are always directed to a compliant self-hosted deployment, regardless of cost or capability considerations.
+
+**Technologies:**
+- *Open Source Routing Frameworks* — LiteLLM (unified API across providers), RouteLLM, OpenRouter
+- *Self-Hosted Inference* — vLLM, Ollama, TGI (Text Generation Inference by HuggingFace), Triton Inference Server
+- *External LLM Providers* — OpenAI, Anthropic, Google Vertex AI, Cohere, Mistral AI
+
 ---
 
 ## Data Flow

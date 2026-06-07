@@ -4,4 +4,4 @@ This repo contains basic system design notes and diagrams for a few standard arc
 
 ## Contents
 
-1. **LLM-Powered Chatbot** - System design for a basic LLM chatbot with RAG, Guardrails, and multi-provider model routing &nbsp; \[ [Overview Doc](designs/llm-chatbot-overview.md) ::: [Detailed Doc](designs/llm-chatbot.md) \]
+1. **LLM-Powered Chatbot** - System design for a basic LLM chatbot with RAG, Guardrails, and multi-provider model routing &nbsp; \[ [Overview Doc](designs/llm-chatbot-overview.md) / [Detailed Doc](designs/llm-chatbot.md) \]

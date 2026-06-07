@@ -1,6 +1,6 @@
-# System Design
+# Tech Deep Dive
 
-This repo contains basic system design notes and diagrams for a few standard architectures and problems. It covers common patterns and components used in real-world systems, serving as a quick reference for design decisions and trade-offs.
+A collection of in-depth technical notes, system design documents, and architecture deep dives. Each topic explores real-world patterns, trade-offs, and implementation considerations across a range of systems and technologies.
 
 ## Contents
 
